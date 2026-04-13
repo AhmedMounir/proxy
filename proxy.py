@@ -203,11 +203,21 @@ async def transfer_data(
             await writer.drain()
     except asyncio.CancelledError:
         pass
+    except ConnectionError as e:
+        logger.debug("%s: Connection error during transfer: %s", log_prefix, e)
+    except OSError as e:
+        if getattr(e, "winerror", None) == 64:
+            logger.debug("%s: Connection reset (WinError 64) during transfer", log_prefix)
+        else:
+            logger.exception("%s: OS error during data transfer", log_prefix)
     except Exception:
-        logger.exception("Error during data transfer")
+        logger.exception("%s: Error during data transfer", log_prefix)
     finally:
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except Exception as e:
+            logger.debug("%s: Error closing writer: %s", log_prefix, e)
 
 
 async def handle_client(
@@ -239,11 +249,21 @@ async def handle_client(
             await handle_http(
                 client_reader, client_writer, method, target, version, request_line
             )
+    except ConnectionError as e:
+        logger.debug("Connection error handling client request: %s", e)
+    except OSError as e:
+        if getattr(e, "winerror", None) == 64:
+            logger.debug("Connection reset (WinError 64) handling client request")
+        else:
+            logger.exception("OS error handling client request")
     except Exception:
         logger.exception("Error handling client request")
     finally:
         client_writer.close()
-        await client_writer.wait_closed()
+        try:
+            await client_writer.wait_closed()
+        except Exception as e:
+            logger.debug("Error closing client writer: %s", e)
 
 
 async def handle_http(
@@ -279,6 +299,13 @@ async def handle_http(
             transfer_data(client_reader, server_writer, f"Client -> {host}"),
             transfer_data(server_reader, client_writer, f"{host} -> Client"),
         )
+    except ConnectionError as e:
+        logger.debug("Connection error handling HTTP request for %s: %s", host, e)
+    except OSError as e:
+        if getattr(e, "winerror", None) == 64:
+            logger.debug("Connection reset (WinError 64) handling HTTP request for %s", host)
+        else:
+            logger.exception("OS error handling HTTP request for %s", host)
     except Exception:
         logger.exception("Error handling HTTP request for %s", host)
 
@@ -338,9 +365,29 @@ async def handle_connect(
             transfer_data(server_reader, client_writer, f"{host} -> Client"),
         )
         return client_writer
+    except ConnectionError as e:
+        logger.debug("Connection error handling CONNECT request for %s: %s", host, e)
+        return client_writer
+    except OSError as e:
+        if getattr(e, "winerror", None) == 64:
+            logger.debug("Connection reset (WinError 64) handling CONNECT request for %s", host)
+        else:
+            logger.exception("OS error handling CONNECT request for %s", host)
+        return client_writer
     except Exception:
         logger.exception("Error handling CONNECT request for %s", host)
         return client_writer
+
+
+class SSLStreamReaderProtocol(asyncio.StreamReaderProtocol):
+    """
+    A StreamReaderProtocol that suppresses the default True return value
+    from eof_received to avoid warnings with SSL transports.
+    """
+
+    def eof_received(self) -> bool:
+        super().eof_received()
+        return False
 
 
 async def start_tls(
@@ -361,13 +408,13 @@ async def start_tls(
     """
     loop = asyncio.get_running_loop()
     new_reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(new_reader)
+    protocol = SSLStreamReaderProtocol(new_reader)
     transport = writer.transport
-    
+
     tls_transport = await loop.start_tls(
         transport, protocol, ssl_context, server_side=True
     )
-    
+
     new_writer = asyncio.StreamWriter(tls_transport, protocol, new_reader, loop)
     return new_reader, new_writer
 
