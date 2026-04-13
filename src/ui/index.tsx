@@ -43,10 +43,16 @@ const App = () => {
 		});
 
 		const handleConn = (count: number) => setActiveConnections(count);
-		const handleReq = (req: any) => {
+		const handleReq = (
+			req: Partial<{ method: string; url: string }> & { id: string },
+		) => {
 			setRecentRequests((prev) => {
 				const updated = [
-					{ id: req.id, method: req.method, url: req.url },
+					{
+						id: req.id,
+						method: req.method || "UNKNOWN",
+						url: req.url || "UNKNOWN",
+					},
 					...prev,
 				];
 				return updated.slice(0, 10);

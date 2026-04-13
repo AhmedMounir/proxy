@@ -16,8 +16,8 @@ for (const raw of lcov.split("\n")) {
   if (line.startsWith("SF:")) {
     cur = { path: line.slice(3), lines: new Map(), fns: [], branches: [] }
   } else if (line.startsWith("DA:") && cur) {
-    const [ln, hits] = line.slice(3).split(",").map(Number)
-    cur.lines.set(ln, hits)
+    const parts = line.slice(3).split(",")
+    cur.lines.set(Number(parts[0]), Number(parts[1]))
   } else if (line.startsWith("FN:") && cur) {
     const [ln, ...rest] = line.slice(3).split(",")
     cur.fns.push({ name: rest.join(","), line: Number(ln), hits: 0 })

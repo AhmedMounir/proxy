@@ -18,13 +18,14 @@ export class CAManager {
 	public getCertificateForHost(host: string): { key: string; cert: string } {
 		// Strip out the port if present and wildcard the lowest subdomain level
 		const parts = host.split(":")[0]?.split(".");
-		let certHost = host.split(":")[0]!;
+		let certHost = host.split(":")[0] ?? host;
 		if (parts && parts.length > 2) {
 			certHost = `*.${parts.slice(1).join(".")}`;
 		}
 
-		if (this.certCache.has(certHost)) {
-			return this.certCache.get(certHost)!;
+		const cached = this.certCache.get(certHost);
+		if (cached) {
+			return cached;
 		}
 
 		const keys = forge.pki.rsa.generateKeyPair(2048);

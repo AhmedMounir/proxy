@@ -53,30 +53,25 @@ export class ProxyServer {
 
 			const [method, target, _version] = reqLine.split(" ");
 
-			if (method === "CONNECT") {
+			if (method === "CONNECT" && target) {
 				let targetHost = target;
 				let targetPort = 443;
 
-				if (target?.includes(":")) {
+				if (target.includes(":")) {
 					const parts = target.split(":");
-					targetHost = parts[0]!;
+					targetHost = parts[0] ?? targetHost;
 					targetPort = parseInt(parts[1] || "443", 10);
 				}
 
 				// Handle the connection
 				this.mitmHandler
-					.handleConnect(
-						clientSocket,
-						targetHost!,
-						targetPort,
-						this.mitmEnabled,
-					)
+					.handleConnect(clientSocket, targetHost, targetPort, this.mitmEnabled)
 					.catch((err) => {
 						Reactor.emit("request:error", "mitm-error", err);
 						clientSocket.destroy();
 					});
 			} else {
-				this.handlePlainHttp(clientSocket, data as Buffer, reqLine!, lines);
+				this.handlePlainHttp(clientSocket, data as Buffer, reqLine, lines);
 			}
 		});
 
@@ -112,7 +107,7 @@ export class ProxyServer {
 
 		if (host.includes(":")) {
 			const parts = host.split(":");
-			targetHost = parts[0]!;
+			targetHost = parts[0] ?? targetHost;
 			targetPort = parseInt(parts[1] || "80", 10);
 		}
 

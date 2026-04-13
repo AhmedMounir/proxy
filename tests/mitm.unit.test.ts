@@ -8,9 +8,12 @@ import { MitmHandler } from "../src/proxy/mitm";
 mock.module("node:tls", () => {
 	class MockTLSSocket extends EventEmitter {
 		isServer: boolean;
-		constructor(socket: any, options: any) {
+		constructor(
+			socket: Record<string, unknown>,
+			options: { isServer?: boolean },
+		) {
 			super();
-			this.isServer = options?.isServer;
+			this.isServer = !!options?.isServer;
 			// simulate a connected socket receiving data after a short delay
 			setTimeout(() => {
 				// We decide based on a flag attached to the socket for testing
@@ -59,12 +62,12 @@ describe("MitmHandler Unit Tests", () => {
 
 	test("should handleConnect with enableMitm = true and mock TLS", async () => {
 		const clientSocket = new EventEmitter() as unknown as net.Socket;
-		(clientSocket as Record<string, unknown>).write = mock(
+		(clientSocket as unknown as Record<string, unknown>).write = mock(
 			(_text: string, cb?: (err: Error | null) => void) => {
 				if (cb) cb(null);
 			},
 		);
-		(clientSocket as Record<string, unknown>).destroy = mock();
+		(clientSocket as unknown as Record<string, unknown>).destroy = mock();
 
 		handler.handleConnect(clientSocket, "example.com", 443, true);
 
@@ -77,13 +80,13 @@ describe("MitmHandler Unit Tests", () => {
 
 	test("should handleConnect with enableMitm = true and non-HTTP data", async () => {
 		const clientSocket = new EventEmitter() as unknown as net.Socket;
-		(clientSocket as Record<string, unknown>).nonHttp = true;
-		(clientSocket as Record<string, unknown>).write = mock(
+		(clientSocket as unknown as Record<string, unknown>).nonHttp = true;
+		(clientSocket as unknown as Record<string, unknown>).write = mock(
 			(_text: string, cb?: (err: Error | null) => void) => {
 				if (cb) cb(null);
 			},
 		);
-		(clientSocket as Record<string, unknown>).destroy = mock();
+		(clientSocket as unknown as Record<string, unknown>).destroy = mock();
 
 		handler.handleConnect(clientSocket, "example.com", 443, true);
 
