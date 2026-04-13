@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { Box, render, Text, useInput } from "ink";
+import { Box, render, Static, Text, useInput } from "ink";
 import { useEffect, useState } from "react";
 import { Reactor } from "../engine/reactor";
 import { CAManager } from "../proxy/ca";
@@ -33,7 +33,7 @@ const App = () => {
 	const [mitmEnabled, setMitmEnabled] = useState(false);
 	const [recording, setRecording] = useState(false);
 	const [recentRequests, setRecentRequests] = useState<
-		{ id: string; method: string; url: string }[]
+		{ id: string; method: string; url: string; timestamp: Date }[]
 	>([]);
 
 	useEffect(() => {
@@ -48,14 +48,16 @@ const App = () => {
 		) => {
 			setRecentRequests((prev) => {
 				const updated = [
+					...prev,
 					{
 						id: req.id,
 						method: req.method || "UNKNOWN",
 						url: req.url || "UNKNOWN",
+						timestamp: new Date(),
 					},
-					...prev,
 				];
-				return updated.slice(0, 10);
+				// Keep history manageable but allow scrolling natural terminal history
+				return updated.slice(-2000);
 			});
 		};
 
@@ -88,67 +90,53 @@ const App = () => {
 	});
 
 	return (
-		<Box flexDirection="column" padding={1}>
-			<Box
-				borderStyle="round"
-				borderColor="cyan"
-				padding={1}
-				flexDirection="column"
-			>
-				<Text bold color="cyan">
-					Bun Proxy Server Dashboard
-				</Text>
-				<Text>
-					Listening:{" "}
-					<Text color="green">
-						{host}:{port}
-					</Text>
-				</Text>
-				<Text>
-					Active Connections: <Text color="yellow">{activeConnections}</Text>
-				</Text>
-			</Box>
-
-			<Box marginTop={1} flexDirection="column">
-				<Text bold>Controls:</Text>
-				<Text>
-					[<Text color="blue">m</Text>] Toggle MITM:
-					<Text color={mitmEnabled ? "green" : "red"}>
-						{" "}
-						{mitmEnabled ? "ENABLED" : "DISABLED"}
-					</Text>
-				</Text>
-				<Text>
-					[<Text color="blue">r</Text>] Toggle HAR Trace:
-					<Text color={recording ? "green" : "red"}>
-						{" "}
-						{recording ? "RECORDING" : "STOPPED"}
-					</Text>
-				</Text>
-				<Text>
-					[<Text color="blue">q</Text>] Quit
-				</Text>
-			</Box>
-
-			<Box
-				marginTop={1}
-				flexDirection="column"
-				borderStyle="single"
-				borderColor="gray"
-				padding={1}
-			>
-				<Text bold>Recent Requests</Text>
-				{recentRequests.length === 0 && (
-					<Text color="gray">No requests yet...</Text>
+		<>
+			<Static items={recentRequests}>
+				{(req) => (
+					<Box key={req.id}>
+						<Text color="gray">[{req.timestamp.toLocaleTimeString()}]</Text>
+						<Text> </Text>
+						<Text color="magenta">{req.method.padEnd(8)}</Text>
+						<Text>
+							{req.url.length > 100
+								? req.url.substring(0, 97) + "..."
+								: req.url}
+						</Text>
+					</Box>
 				)}
-				{recentRequests.map((req) => (
-					<Text key={req.id}>
-						<Text color="magenta">{req.method.padEnd(8)}</Text>{" "}
-						{req.url.substring(0, 70) + (req.url.length > 70 ? "..." : "")}
-					</Text>
-				))}
+			</Static>
+
+			{/* Pinned Footer */}
+			<Box flexDirection="column" marginTop={1}>
+				<Box borderStyle="single" borderColor="gray" flexDirection="column">
+					<Box justifyContent="space-between" width="100%">
+						<Text bold>
+							<Text color="cyan">Bun Proxy</Text> • Listening:{" "}
+							<Text color="green">
+								{host}:{port}
+							</Text>
+						</Text>
+						<Text>
+							Connections: <Text color="yellow">{activeConnections}</Text>
+						</Text>
+					</Box>
+
+					<Box marginTop={1}>
+						<Text>
+							[<Text color="blue">m</Text>] MITM:{" "}
+							<Text color={mitmEnabled ? "green" : "red"}>
+								{mitmEnabled ? "ON " : "OFF"}
+							</Text>{" "}
+							| [<Text color="blue">r</Text>] HAR Profile:{" "}
+							<Text color={recording ? "green" : "red"}>
+								{recording ? "ON " : "OFF"}
+							</Text>{" "}
+							| [<Text color="blue">q</Text>] Quit
+						</Text>
+					</Box>
+				</Box>
 			</Box>
-		</Box>
+		</>
 	);
 };
 
