@@ -28,21 +28,23 @@ export class MitmHandler {
 			cert: certs.cert,
 		});
 
-		clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n", (err) => {
-			if (err) return; // Client disconnected early
+		clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
 
-			const tlsSocket = new tls.TLSSocket(clientSocket, {
-				isServer: true,
-				secureContext: secureContext,
-			});
+		const tlsSocket = new tls.TLSSocket(clientSocket, {
+			isServer: true,
+			secureContext: secureContext,
+		});
 
-			// The socket is now decrypted. Wait for client to send HTTP payload.
-			tlsSocket.on("error", (err) => {
-				// Silence WinError 64 issues or gracefully log
-				Reactor.emit("request:error", `mitm-${targetHost}`, err);
-			});
+        clientSocket.resume();
 
-			tlsSocket.once("data", async (initialData) => {
+		// The socket is now decrypted. Wait for client to send HTTP payload.
+		tlsSocket.on("error", (err) => {
+			console.log("TLS ERROR mitm-" + targetHost, err.message);
+			// Silence WinError 64 issues or gracefully log
+			Reactor.emit("request:error", `mitm-${targetHost}`, err);
+		});
+
+		tlsSocket.once("data", async (initialData) => {
 				try {
 					// Determine if it looks like an HTTP request
 					const reqString = initialData.toString("utf-8", 0, 500);
@@ -55,12 +57,16 @@ export class MitmHandler {
 						reqString.startsWith("HEAD ") ||
 						reqString.startsWith("PATCH ");
 
+					tlsSocket.pause();
+
 					// Connect to true remote
 					const remoteTls = tls.connect(
 						targetPort,
 						targetHost,
-						{ rejectUnauthorized: false },
+						{ rejectUnauthorized: false, servername: targetHost },
 						() => {
+							tlsSocket.resume();
+
 							// Send the intercepted payload
 							remoteTls.write(initialData as Buffer);
 
@@ -122,7 +128,6 @@ export class MitmHandler {
 					tlsSocket.destroy();
 				}
 			});
-		});
 	}
 
 	private handleBlindRelay(

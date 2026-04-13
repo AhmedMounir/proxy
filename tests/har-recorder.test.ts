@@ -28,15 +28,15 @@ describe("HarRecorder", () => {
 		recorder.startRecording();
 		expect(recorder.getStatus()).toBe(true);
 
-		const spy = spyOn(fs, "writeFileSync").mockImplementation(() => {});
-
 		recorder.stopRecording();
 		expect(recorder.getStatus()).toBe(false);
-
-		spy.mockRestore();
 	});
 
 	it("should not record when isRecording is false", () => {
+		recorder.startRecording(); // Start first so we have the header
+		recorder.stopRecording(); // Immediately stop
+
+		// Fire an event while NOT recording
 		Reactor.emit("request:start", {
 			id: "test-req-1",
 			method: "GET",
@@ -44,16 +44,10 @@ describe("HarRecorder", () => {
 			startTime: Date.now(),
 		});
 
-		const spy = spyOn(fs, "writeFileSync").mockImplementation(() => {});
-
-		recorder.stopRecording();
-
-		expect(spy).toHaveBeenCalled();
-		const callArgs = spy.mock.calls[0] as unknown[];
-		const harData = JSON.parse(callArgs[1] as string);
+		expect(fs.existsSync(testFile)).toBe(true);
+		const harContent = fs.readFileSync(testFile, "utf-8");
+		const harData = JSON.parse(harContent);
 		expect(harData.log.entries.length).toBe(0);
-
-		spy.mockRestore();
 	});
 
 	it("should record request events and dump valid HAR file", () => {
@@ -71,7 +65,7 @@ describe("HarRecorder", () => {
 		Reactor.emit(
 			"request:chunk",
 			"test-req-2",
-			Buffer.from("request-body"),
+			Buffer.from("POST /api HTTP/1.1\r\nHost: example.com\r\n\r\nrequest-body"),
 			"request",
 		);
 
@@ -79,16 +73,8 @@ describe("HarRecorder", () => {
 		Reactor.emit(
 			"request:chunk",
 			"test-req-2",
-			Buffer.from("response-body"),
+			Buffer.from("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\nresponse-body"),
 			"response",
-		);
-
-		// Test init chunk (should be ignored based on current code)
-		Reactor.emit(
-			"request:chunk",
-			"test-req-2",
-			Buffer.from("init-data"),
-			"init",
 		);
 
 		// End request
@@ -125,14 +111,11 @@ describe("HarRecorder", () => {
 		);
 		Reactor.emit("request:end", "non-existent", { endTime: Date.now() });
 
-		const spy = spyOn(fs, "writeFileSync").mockImplementation(() => {});
-
 		recorder.stopRecording();
 
-		const callArgs = spy.mock.calls[0] as unknown[];
-		const harData = JSON.parse(callArgs[1] as string);
+		expect(fs.existsSync(testFile)).toBe(true);
+		const harContent = fs.readFileSync(testFile, "utf-8");
+		const harData = JSON.parse(harContent);
 		expect(harData.log.entries.length).toBe(0);
-
-		spy.mockRestore();
 	});
 });

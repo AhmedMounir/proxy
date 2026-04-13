@@ -47,8 +47,6 @@ export class ProxyServer {
 			const lines = requestStr.split("\r\n");
 			const reqLine = lines[0];
 
-			console.log("PROXY RECEIVED:", reqLine);
-
 			if (!reqLine) return clientSocket.destroy();
 
 			const [method, target, _version] = reqLine.split(" ");
@@ -87,7 +85,6 @@ export class ProxyServer {
 		lines: string[],
 	) {
 		let host = "";
-		console.log("Header lines:", lines);
 		for (const line of lines) {
 			if (line.toLowerCase().startsWith("host:")) {
 				host = line.substring(5).trim();
@@ -95,10 +92,7 @@ export class ProxyServer {
 			}
 		}
 
-		console.log("Extracted host:", host);
-
 		if (!host) {
-			console.log("No host, destroying");
 			return clientSocket.destroy();
 		}
 
@@ -111,12 +105,9 @@ export class ProxyServer {
 			targetPort = parseInt(parts[1] || "80", 10);
 		}
 
-		console.log("Parsing Target...", targetHost, targetPort);
 		const id = crypto.randomUUID();
-		console.log("Got id:", id);
 		const [method, target] = reqLine.split(" ");
 
-		console.log("Emitting reactor...");
 		Reactor.emit("request:start", {
 			id,
 			method: method || "UNKNOWN",
@@ -125,9 +116,8 @@ export class ProxyServer {
 			startTime: Date.now(),
 		});
 
-		console.log("Connecting to target server:", targetHost, targetPort);
 		const serverSocket = net.connect(targetPort, targetHost, () => {
-			console.log("Connected, writing data:", initialData.length, "bytes");
+			Reactor.emit("request:chunk", id, initialData as Buffer, "init");
 			serverSocket.write(initialData as Buffer);
 
 			clientSocket.on("data", (chunk) => {
@@ -144,11 +134,9 @@ export class ProxyServer {
 		clientSocket.on("end", () => serverSocket.end());
 
 		serverSocket.on("error", (err) => {
-			console.log("Server socket error:", err);
 			clientSocket.destroy();
 		});
 		clientSocket.on("error", (err) => {
-			console.log("Client socket error:", err);
 			serverSocket.destroy();
 		});
 
