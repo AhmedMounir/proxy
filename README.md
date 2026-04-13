@@ -28,7 +28,9 @@ A modern, high-performance forward proxy built with [Bun](https://bun.sh) and Ty
 
 To perform Man-in-the-Middle (MITM) SSL interception, the proxy requires a local Root Certificate Authority (CA) key pair.
 
-If you don't already have `ca.pem` and `ca-key.pem` in your project root, you can generate them using OpenSSL:
+**The proxy will automatically generate** `ca.pem` and `ca-key.pem` in the project root on its first run if they do not already exist.
+
+*(Optional)* If you prefer to generate them manually, you can use OpenSSL:
 
 ```bash
 # Generate the private key

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as forge from "node-forge";
 
@@ -8,8 +8,52 @@ export class CAManager {
 	private certCache: Map<string, { key: string; cert: string }> = new Map();
 
 	constructor(caCertPath: string, caKeyPath: string) {
-		const certPem = readFileSync(resolve(caCertPath), "utf8");
-		const keyPem = readFileSync(resolve(caKeyPath), "utf8");
+		const resolvedCertPath = resolve(caCertPath);
+		const resolvedKeyPath = resolve(caKeyPath);
+
+		if (!existsSync(resolvedCertPath) || !existsSync(resolvedKeyPath)) {
+			console.log("Generating new Root CA...");
+			const keys = forge.pki.rsa.generateKeyPair(2048);
+			const cert = forge.pki.createCertificate();
+
+			cert.publicKey = keys.publicKey;
+			cert.serialNumber = `${Math.floor(Math.random() * 100000)}`;
+
+			cert.validity.notBefore = new Date();
+			cert.validity.notBefore.setFullYear(
+				cert.validity.notBefore.getFullYear() - 1,
+			);
+			cert.validity.notAfter = new Date();
+			cert.validity.notAfter.setFullYear(
+				cert.validity.notAfter.getFullYear() + 10,
+			);
+
+			const attrs = [{ name: "commonName", value: "My Proxy CA" }];
+			cert.setSubject(attrs);
+			cert.setIssuer(attrs);
+			cert.setExtensions([
+				{ name: "basicConstraints", cA: true },
+				{
+					name: "keyUsage",
+					keyCertSign: true,
+					digitalSignature: true,
+					nonRepudiation: true,
+					keyEncipherment: true,
+					dataEncipherment: true,
+				},
+			]);
+
+			cert.sign(keys.privateKey, forge.md.sha256.create());
+
+			writeFileSync(resolvedCertPath, forge.pki.certificateToPem(cert));
+			writeFileSync(
+				resolvedKeyPath,
+				forge.pki.privateKeyToPem(keys.privateKey),
+			);
+		}
+
+		const certPem = readFileSync(resolvedCertPath, "utf8");
+		const keyPem = readFileSync(resolvedKeyPath, "utf8");
 
 		this.caCert = forge.pki.certificateFromPem(certPem);
 		this.caKey = forge.pki.privateKeyFromPem(keyPem);
