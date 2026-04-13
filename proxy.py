@@ -1,37 +1,34 @@
-
 """
-A forward proxy server with SSL/TLS interception.
+A high-performance forward proxy server.
 
-This script implements a forward proxy server that can intercept and log HTTP and
-HTTPS traffic. It uses the asyncio library for handling concurrent client
-connections and the cryptography library for generating TLS certificates on the fly.
+This script implements a lightweight forward proxy server to route traffic 
+from clients (like WSL) through the host to the internet. 
+It supports HTTP bridging and acts as a blind TCP relay for HTTPS/CONNECT traffic,
+properly handling TCP half-closes to enable WebSockets and HTTP/2.
 """
 
 import asyncio
 import argparse
 import logging
-import ssl
-import ipaddress
+import urllib.parse
+import socket
 from pathlib import Path
-from typing import Tuple
-from datetime import datetime, timedelta, timezone
 
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
+def tune_socket(writer: asyncio.StreamWriter) -> None:
+    sock = writer.get_extra_info('socket')
+    if sock is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except Exception as e:
+            logger.debug("Failed to tune socket: %s", e)
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 
 def setup_logging(log_file: Path) -> None:
-    """
-    Configures logging to both console and a file.
-
-    Args:
-        log_file: The path to the log file.
-    """
+    """Configures logging to both console and a file."""
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -43,156 +40,12 @@ def setup_logging(log_file: Path) -> None:
     )
 
 
-class CertificateAuthority:
-    """
-    Manages the Certificate Authority (CA) for signing certificates.
-    """
-
-    def __init__(self, ca_file: Path, key_file: Path, cert_dir: Path = Path("certs")):
-        self.ca_file = ca_file
-        self.key_file = key_file
-        self.cert_dir = cert_dir
-        self.cert_dir.mkdir(exist_ok=True)
-        self.ca_cert, self.ca_key = self._load_or_create_ca()
-        self._cert_locks = {}
-
-    def _load_or_create_ca(self) -> Tuple[x509.Certificate, rsa.RSAPrivateKey]:
-        """
-        Loads an existing CA certificate and key or creates them if they don't exist.
-
-        Returns:
-            A tuple containing the CA certificate and private key.
-        """
-        if self.ca_file.exists() and self.key_file.exists():
-            logger.info("Loading existing CA certificate and key.")
-            with self.key_file.open("rb") as f:
-                ca_key = serialization.load_pem_private_key(f.read(), password=None)
-            with self.ca_file.open("rb") as f:
-                ca_cert = x509.load_pem_x509_certificate(f.read())
-        else:
-            logger.info("Generating new CA certificate and key.")
-            ca_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048,
-            )
-            subject = issuer = x509.Name(
-                [
-                    x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-                    x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "California"),
-                    x509.NameAttribute(NameOID.LOCALITY_NAME, "San Francisco"),
-                    x509.NameAttribute(NameOID.ORGANIZATION_NAME, "My Proxy"),
-                    x509.NameAttribute(NameOID.COMMON_NAME, "My Proxy CA"),
-                ]
-            )
-            ca_cert = (
-                x509.CertificateBuilder()
-                .subject_name(subject)
-                .issuer_name(issuer)
-                .public_key(ca_key.public_key())
-                .serial_number(x509.random_serial_number())
-                .not_valid_before(datetime.now(timezone.utc))
-                .not_valid_after(datetime.now(timezone.utc) + timedelta(days=3650))
-                .add_extension(
-                    x509.BasicConstraints(ca=True, path_length=None),
-                    critical=True,
-                )
-                .sign(ca_key, hashes.SHA256())
-            )
-            with self.key_file.open("wb") as f:
-                f.write(
-                    ca_key.private_bytes(
-                        encoding=serialization.Encoding.PEM,
-                        format=serialization.PrivateFormat.TraditionalOpenSSL,
-                        encryption_algorithm=serialization.NoEncryption(),
-                    )
-                )
-            with self.ca_file.open("wb") as f:
-                f.write(ca_cert.public_bytes(serialization.Encoding.PEM))
-        return ca_cert, ca_key
-
-    async def generate_server_certificate(self, hostname: str) -> Tuple[Path, Path]:
-        """
-        Generates a certificate for the given hostname, signed by the CA.
-
-        Args:
-            hostname: The hostname for the certificate.
-
-        Returns:
-            A tuple containing the paths to the generated certificate and key files.
-        """
-        cert_path = self.cert_dir / f"{hostname}.pem"
-        key_path = self.cert_dir / f"{hostname}-key.pem"
-
-        if cert_path.exists() and key_path.exists():
-            return cert_path, key_path
-
-        lock = self._cert_locks.setdefault(hostname, asyncio.Lock())
-        async with lock:
-            if cert_path.exists() and key_path.exists():
-                return cert_path, key_path
-
-            logger.info("Generating certificate for %s", hostname)
-            
-            def _generate_cert():
-                server_key = rsa.generate_private_key(
-                    public_exponent=65537,
-                    key_size=2048,
-                )
-                subject = x509.Name(
-                    [
-                        x509.NameAttribute(NameOID.COMMON_NAME, hostname),
-                    ]
-                )
-                
-                try:
-                    san = x509.IPAddress(ipaddress.ip_address(hostname))
-                except ValueError:
-                    san = x509.DNSName(hostname)
-                
-                server_cert = (
-                    x509.CertificateBuilder()
-                    .subject_name(subject)
-                    .issuer_name(self.ca_cert.subject)
-                    .public_key(server_key.public_key())
-                    .serial_number(x509.random_serial_number())
-                    .not_valid_before(datetime.now(timezone.utc))
-                    .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
-                    .add_extension(
-                        x509.SubjectAlternativeName([san]),
-                        critical=False,
-                    )
-                    .sign(self.ca_key, hashes.SHA256())
-                )
-
-                with key_path.open("wb") as f:
-                    f.write(
-                        server_key.private_bytes(
-                            encoding=serialization.Encoding.PEM,
-                            format=serialization.PrivateFormat.TraditionalOpenSSL,
-                            encryption_algorithm=serialization.NoEncryption(),
-                        )
-                    )
-                with cert_path.open("wb") as f:
-                    f.write(server_cert.public_bytes(serialization.Encoding.PEM))
-                
-                return cert_path, key_path
-
-            return await asyncio.to_thread(_generate_cert)
-
-
 async def transfer_data(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     log_prefix: str,
 ) -> None:
-    """
-    Transfers data between a reader and a writer, logging the traffic.
-
-    Args:
-        reader: The stream reader.
-        writer: The stream writer.
-        log_prefix: The prefix for log messages.
-    """
+    """Transfers data blindly between a reader and a writer with TCP half-close support."""
     try:
         while not reader.at_eof():
             data = await reader.read(65536)
@@ -203,8 +56,6 @@ async def transfer_data(
             await writer.drain()
     except asyncio.CancelledError:
         pass
-    except ssl.SSLError as e:
-        logger.debug("%s: SSL error during transfer (disconnect): %s", log_prefix, e)
     except ConnectionError as e:
         logger.debug("%s: Connection error during transfer: %s", log_prefix, e)
     except OSError as e:
@@ -215,26 +66,20 @@ async def transfer_data(
     except Exception as e:
         logger.debug("%s: Error during data transfer: %s", log_prefix, e)
     finally:
-        writer.close()
+        # Perform TCP half-close to signal EOF without severing the raw TCP socket.
+        # This keeps the other direction alive for WebSockets/HTTP chunking.
         try:
-            await writer.wait_closed()
+            if writer.can_write_eof():
+                writer.write_eof()
         except Exception as e:
-            logger.debug("%s: Error closing writer: %s", log_prefix, e)
+            logger.debug("%s: Error during half-close (write_eof): %s", log_prefix, e)
 
 
 async def handle_client(
     client_reader: asyncio.StreamReader,
     client_writer: asyncio.StreamWriter,
-    ca: CertificateAuthority,
 ) -> None:
-    """
-    Handles a client connection.
-
-    Args:
-        client_reader: The client's stream reader.
-        client_writer: The client's stream writer.
-        ca: The CertificateAuthority instance.
-    """
+    """Handles a client connection."""
     try:
         request_line = await client_reader.readline()
         if not request_line:
@@ -244,8 +89,8 @@ async def handle_client(
         logger.info("Request: %s %s %s", method, target, version)
 
         if method == "CONNECT":
-            client_writer = await handle_connect(
-                client_reader, client_writer, target, version, ca
+            await handle_connect(
+                client_reader, client_writer, target, version
             )
         else:
             await handle_http(
@@ -276,21 +121,12 @@ async def handle_http(
     version: str,
     request_line: bytes,
 ) -> None:
-    """
-    Handles a plain HTTP request.
-
-    Args:
-        client_reader: The client's stream reader.
-        client_writer: The client's stream writer.
-        method: The HTTP method.
-        target: The request target.
-        version: The HTTP version.
-        request_line: The full request line.
-    """
+    """Handles a plain HTTP request."""
     headers = await read_headers(client_reader)
     host = headers.get("Host", "").split(":")[0]
     port = 80
 
+    server_writer = None
     try:
         server_reader, server_writer = await asyncio.open_connection(host, port)
         server_writer.write(request_line)
@@ -310,6 +146,13 @@ async def handle_http(
             logger.exception("OS error handling HTTP request for %s", host)
     except Exception:
         logger.exception("Error handling HTTP request for %s", host)
+    finally:
+        if server_writer:
+            server_writer.close()
+            try:
+                await server_writer.wait_closed()
+            except Exception as e:
+                logger.debug("Error closing server writer for %s: %s", host, e)
 
 
 async def handle_connect(
@@ -317,23 +160,13 @@ async def handle_connect(
     client_writer: asyncio.StreamWriter,
     target: str,
     version: str,
-    ca: CertificateAuthority,
-) -> asyncio.StreamWriter:
-    """
-    Handles an HTTP CONNECT request for SSL/TLS interception.
+) -> None:
+    """Handles an HTTP CONNECT request purely as a TCP relay."""
+    # Consume the remaining headers from the CONNECT request block 
+    # so they do not leak into the transparent TLS tunnel
+    await read_headers(client_reader)
 
-    Args:
-        client_reader: The client's stream reader.
-        client_writer: The client's stream writer.
-        target: The target host and port.
-        version: The HTTP version.
-        ca: The CertificateAuthority instance.
-        
-    Returns:
-        The (potentially wrapped) stream writer.
-    """
-    import urllib.parse
-    
+    # Robust URL Parsing for Bun's non-standard CONNECT requests
     if target.startswith("http://") or target.startswith("https://"):
         parsed = urllib.parse.urlparse(target)
         host = parsed.hostname
@@ -347,90 +180,37 @@ async def handle_connect(
             host = target
             port = 443
 
+    server_writer = None
     try:
-        # Respond to the CONNECT request
+        # Establish connection to the actual target server FIRST
+        server_reader, server_writer = await asyncio.open_connection(host, port)
+
+        # Confirm to the client that the connection is ready (synchronously)
         client_writer.write(f"{version} 200 Connection Established\r\n\r\n".encode())
         await client_writer.drain()
 
-        # Generate server certificate
-        cert_path, key_path = await ca.generate_server_certificate(host)
-
-        # Create SSL context for the client-side connection
-        client_ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        client_ssl_context.load_cert_chain(certfile=cert_path, keyfile=key_path)
-        client_ssl_context.set_alpn_protocols(["http/1.1"])
-
-        # Wrap the client connection with SSL/TLS
-        client_reader, client_writer = await start_tls(
-            client_reader, client_writer, client_ssl_context
-        )
-
-        # Connect to the actual server
-        server_ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-        server_ssl_context.set_alpn_protocols(["http/1.1"])
-        
-        server_reader, server_writer = await asyncio.open_connection(
-            host, port, ssl=server_ssl_context
-        )
-
-        # Transfer data between client and server
+        # Blindly transfer raw TCP data while supporting half-close
         await asyncio.gather(
             transfer_data(client_reader, server_writer, f"Client -> {host}"),
             transfer_data(server_reader, client_writer, f"{host} -> Client"),
         )
-        return client_writer
     except ConnectionError as e:
         logger.debug("Connection error handling CONNECT request for %s: %s", host, e)
-        return client_writer
     except OSError as e:
         if getattr(e, "winerror", None) == 64:
             logger.debug("Connection reset (WinError 64) handling CONNECT request for %s", host)
         else:
             logger.exception("OS error handling CONNECT request for %s", host)
-        return client_writer
     except Exception:
         logger.exception("Error handling CONNECT request for %s", host)
-        return client_writer
-
-
-class SSLStreamReaderProtocol(asyncio.StreamReaderProtocol):
-    """
-    A StreamReaderProtocol that suppresses the default True return value
-    from eof_received to avoid warnings with SSL transports.
-    """
-
-    def eof_received(self) -> bool:
-        super().eof_received()
-        return False
-
-
-async def start_tls(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-    ssl_context: ssl.SSLContext,
-) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """
-    Starts TLS on an existing connection.
-
-    Args:
-        reader: The stream reader.
-        writer: The stream writer.
-        ssl_context: The SSL context.
-
-    Returns:
-        A new reader and writer for the TLS-encrypted connection.
-    """
-    loop = asyncio.get_running_loop()
-    new_reader = asyncio.StreamReader()
-    protocol = SSLStreamReaderProtocol(new_reader)
-    transport = writer.transport
-
-    tls_transport = await loop.start_tls(
-        transport, protocol, ssl_context, server_side=True
-    )
-
-    new_writer = asyncio.StreamWriter(tls_transport, protocol, new_reader, loop)
-    return new_reader, new_writer
+    finally:
+        # Complete full socket termination ONLY after both directions finish
+        if server_writer:
+            server_writer.close()
+            try:
+                await server_writer.wait_closed()
+            except Exception as e:
+                logger.debug("Error fully closing server socket for %s: %s", host, e)
 
 
 class Headers:
@@ -464,23 +244,13 @@ class Headers:
 
 
 async def read_headers(reader: asyncio.StreamReader) -> Headers:
-    """
-    Reads headers from a stream reader.
-
-    Args:
-        reader: The stream reader.
-
-    Returns:
-        A Headers object.
-    """
+    """Reads headers from a stream reader."""
     return await Headers.from_reader(reader)
 
 
 async def main() -> None:
-    """
-    The main function to start the proxy server.
-    """
-    parser = argparse.ArgumentParser(description="A forward proxy with SSL/TLS interception.")
+    """The main function to start the proxy server."""
+    parser = argparse.ArgumentParser(description="A robust forward proxy for WSL routing.")
     parser.add_argument(
         "--host", type=str, required=True, help="The host to bind the proxy to."
     )
@@ -497,13 +267,8 @@ async def main() -> None:
 
     setup_logging(args.log_file)
 
-    ca = CertificateAuthority(
-        ca_file=Path("ca.pem"),
-        key_file=Path("ca-key.pem"),
-    )
-
     server = await asyncio.start_server(
-        lambda r, w: handle_client(r, w, ca),
+        handle_client,
         args.host,
         args.port,
     )
