@@ -11,6 +11,7 @@ import asyncio
 import argparse
 import logging
 import ssl
+import ipaddress
 from pathlib import Path
 from typing import Tuple
 from datetime import datetime, timedelta, timezone
@@ -51,6 +52,7 @@ class CertificateAuthority:
         self.ca_file = ca_file
         self.key_file = key_file
         self.ca_cert, self.ca_key = self._load_or_create_ca()
+        self._cert_locks = {}
 
     def _load_or_create_ca(self) -> Tuple[x509.Certificate, rsa.RSAPrivateKey]:
         """
@@ -122,47 +124,58 @@ class CertificateAuthority:
         if cert_path.exists() and key_path.exists():
             return cert_path, key_path
 
-        logger.info("Generating certificate for %s", hostname)
-        
-        def _generate_cert():
-            server_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048,
-            )
-            subject = x509.Name(
-                [
-                    x509.NameAttribute(NameOID.COMMON_NAME, hostname),
-                ]
-            )
-            server_cert = (
-                x509.CertificateBuilder()
-                .subject_name(subject)
-                .issuer_name(self.ca_cert.subject)
-                .public_key(server_key.public_key())
-                .serial_number(x509.random_serial_number())
-                .not_valid_before(datetime.now(timezone.utc))
-                .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
-                .add_extension(
-                    x509.SubjectAlternativeName([x509.DNSName(hostname)]),
-                    critical=False,
-                )
-                .sign(self.ca_key, hashes.SHA256())
-            )
+        lock = self._cert_locks.setdefault(hostname, asyncio.Lock())
+        async with lock:
+            if cert_path.exists() and key_path.exists():
+                return cert_path, key_path
 
-            with key_path.open("wb") as f:
-                f.write(
-                    server_key.private_bytes(
-                        encoding=serialization.Encoding.PEM,
-                        format=serialization.PrivateFormat.TraditionalOpenSSL,
-                        encryption_algorithm=serialization.NoEncryption(),
-                    )
-                )
-            with cert_path.open("wb") as f:
-                f.write(server_cert.public_bytes(serialization.Encoding.PEM))
+            logger.info("Generating certificate for %s", hostname)
             
-            return cert_path, key_path
+            def _generate_cert():
+                server_key = rsa.generate_private_key(
+                    public_exponent=65537,
+                    key_size=2048,
+                )
+                subject = x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.COMMON_NAME, hostname),
+                    ]
+                )
+                
+                try:
+                    san = x509.IPAddress(ipaddress.ip_address(hostname))
+                except ValueError:
+                    san = x509.DNSName(hostname)
+                
+                server_cert = (
+                    x509.CertificateBuilder()
+                    .subject_name(subject)
+                    .issuer_name(self.ca_cert.subject)
+                    .public_key(server_key.public_key())
+                    .serial_number(x509.random_serial_number())
+                    .not_valid_before(datetime.now(timezone.utc))
+                    .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
+                    .add_extension(
+                        x509.SubjectAlternativeName([san]),
+                        critical=False,
+                    )
+                    .sign(self.ca_key, hashes.SHA256())
+                )
 
-        return await asyncio.to_thread(_generate_cert)
+                with key_path.open("wb") as f:
+                    f.write(
+                        server_key.private_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PrivateFormat.TraditionalOpenSSL,
+                            encryption_algorithm=serialization.NoEncryption(),
+                        )
+                    )
+                with cert_path.open("wb") as f:
+                    f.write(server_cert.public_bytes(serialization.Encoding.PEM))
+                
+                return cert_path, key_path
+
+            return await asyncio.to_thread(_generate_cert)
 
 
 async def transfer_data(
@@ -180,10 +193,10 @@ async def transfer_data(
     """
     try:
         while not reader.at_eof():
-            data = await reader.read(4096)
+            data = await reader.read(65536)
             if not data:
                 break
-            logger.info("%s: %s", log_prefix, data)
+            logger.debug("%s: Transferred %d bytes", log_prefix, len(data))
             writer.write(data)
             await writer.drain()
     except asyncio.CancelledError:
@@ -217,7 +230,7 @@ async def handle_client(
         logger.info("Request: %s %s %s", method, target, version)
 
         if method == "CONNECT":
-            await handle_connect(
+            client_writer = await handle_connect(
                 client_reader, client_writer, target, version, ca
             )
         else:
@@ -274,7 +287,7 @@ async def handle_connect(
     target: str,
     version: str,
     ca: CertificateAuthority,
-) -> None:
+) -> asyncio.StreamWriter:
     """
     Handles an HTTP CONNECT request for SSL/TLS interception.
 
@@ -284,6 +297,9 @@ async def handle_connect(
         target: The target host and port.
         version: The HTTP version.
         ca: The CertificateAuthority instance.
+        
+    Returns:
+        The (potentially wrapped) stream writer.
     """
     host, port_str = target.split(":")
     port = int(port_str)
@@ -299,6 +315,7 @@ async def handle_connect(
         # Create SSL context for the client-side connection
         client_ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         client_ssl_context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+        client_ssl_context.set_alpn_protocols(["http/1.1"])
 
         # Wrap the client connection with SSL/TLS
         client_reader, client_writer = await start_tls(
@@ -306,8 +323,11 @@ async def handle_connect(
         )
 
         # Connect to the actual server
+        server_ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        server_ssl_context.set_alpn_protocols(["http/1.1"])
+        
         server_reader, server_writer = await asyncio.open_connection(
-            host, port, ssl=True
+            host, port, ssl=server_ssl_context
         )
 
         # Transfer data between client and server
@@ -315,8 +335,10 @@ async def handle_connect(
             transfer_data(client_reader, server_writer, f"Client -> {host}"),
             transfer_data(server_reader, client_writer, f"{host} -> Client"),
         )
+        return client_writer
     except Exception:
         logger.exception("Error handling CONNECT request for %s", host)
+        return client_writer
 
 
 async def start_tls(
