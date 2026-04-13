@@ -33,7 +33,7 @@ def setup_logging(log_file: Path) -> None:
         log_file: The path to the log file.
     """
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
@@ -203,15 +203,17 @@ async def transfer_data(
             await writer.drain()
     except asyncio.CancelledError:
         pass
+    except ssl.SSLError as e:
+        logger.debug("%s: SSL error during transfer (disconnect): %s", log_prefix, e)
     except ConnectionError as e:
         logger.debug("%s: Connection error during transfer: %s", log_prefix, e)
     except OSError as e:
         if getattr(e, "winerror", None) == 64:
             logger.debug("%s: Connection reset (WinError 64) during transfer", log_prefix)
         else:
-            logger.exception("%s: OS error during data transfer", log_prefix)
-    except Exception:
-        logger.exception("%s: Error during data transfer", log_prefix)
+            logger.debug("%s: OS error during data transfer: %s", log_prefix, e)
+    except Exception as e:
+        logger.debug("%s: Error during data transfer: %s", log_prefix, e)
     finally:
         writer.close()
         try:
@@ -330,8 +332,20 @@ async def handle_connect(
     Returns:
         The (potentially wrapped) stream writer.
     """
-    host, port_str = target.split(":")
-    port = int(port_str)
+    import urllib.parse
+    
+    if target.startswith("http://") or target.startswith("https://"):
+        parsed = urllib.parse.urlparse(target)
+        host = parsed.hostname
+        port = parsed.port or 443
+    else:
+        target = target.rstrip("/")
+        if ":" in target:
+            host, port_str = target.rsplit(":", 1)
+            port = int(port_str)
+        else:
+            host = target
+            port = 443
 
     try:
         # Respond to the CONNECT request
