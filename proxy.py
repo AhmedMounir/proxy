@@ -338,7 +338,7 @@ async def start_tls(
     loop = asyncio.get_running_loop()
     new_reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(new_reader)
-    transport = writer.get_extra_info("transport")
+    transport = writer.transport
     
     tls_transport = await loop.start_tls(
         transport, protocol, ssl_context, server_side=True
