@@ -48,9 +48,11 @@ class CertificateAuthority:
     Manages the Certificate Authority (CA) for signing certificates.
     """
 
-    def __init__(self, ca_file: Path, key_file: Path):
+    def __init__(self, ca_file: Path, key_file: Path, cert_dir: Path = Path("certs")):
         self.ca_file = ca_file
         self.key_file = key_file
+        self.cert_dir = cert_dir
+        self.cert_dir.mkdir(exist_ok=True)
         self.ca_cert, self.ca_key = self._load_or_create_ca()
         self._cert_locks = {}
 
@@ -118,8 +120,8 @@ class CertificateAuthority:
         Returns:
             A tuple containing the paths to the generated certificate and key files.
         """
-        cert_path = Path(f"{hostname}.pem")
-        key_path = Path(f"{hostname}-key.pem")
+        cert_path = self.cert_dir / f"{hostname}.pem"
+        key_path = self.cert_dir / f"{hostname}-key.pem"
 
         if cert_path.exists() and key_path.exists():
             return cert_path, key_path
