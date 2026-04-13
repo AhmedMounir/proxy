@@ -52,7 +52,7 @@ describe("Proxy Server core logic", () => {
 		const ca = new CAManager("./ca.pem", "./ca-key.pem");
 		server = new ProxyServer(ca);
 		await new Promise<void>((resolve) => {
-			const netServer = (server as any).server as net.Server;
+			const netServer = (server as unknown as { server: net.Server }).server;
 			netServer.listen(0, proxyHost, () => {
 				proxyPort = (netServer.address() as net.AddressInfo).port;
 				resolve();
@@ -85,6 +85,34 @@ describe("Proxy Server core logic", () => {
 				console.log("Client error", err);
 				reject(err);
 			});
+		});
+	});
+
+	test("should handle CONNECT method for blind relay (mitmEnabled=false)", async () => {
+		server.mitmEnabled = false;
+		return new Promise<void>((resolve, reject) => {
+			const client = net.connect(proxyPort, proxyHost, () => {
+				const request = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n\r\n`;
+				client.write(request);
+			});
+
+			let data = "";
+			let connected = false;
+			client.on("data", (chunk) => {
+				data += chunk.toString("utf-8");
+				if (!connected && data.includes("200 Connection Established")) {
+					connected = true;
+					data = ""; // clear buffer
+					// Connection established! Now send HTTP request over the tunnel
+					client.write(
+						`GET / HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\nConnection: close\r\n\r\n`,
+					);
+				} else if (connected && data.includes("TARGET_REACHED")) {
+					client.end();
+					resolve();
+				}
+			});
+			client.on("error", reject);
 		});
 	});
 });
